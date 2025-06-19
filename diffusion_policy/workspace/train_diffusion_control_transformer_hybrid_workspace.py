@@ -20,7 +20,7 @@ import tqdm
 import numpy as np
 import shutil
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_transformer_hybrid_image_policy import DiffusionTransformerHybridImagePolicy
+from diffusion_policy.policy.diffusion_control_transformer_hybrid_image_policy import DiffusionControlnetTransformerHybridImagePolicy
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
 from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
@@ -31,7 +31,7 @@ from diffusion_policy.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
+class TrainDiffusionControlnetTransformerHybridWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -44,9 +44,9 @@ class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
-        self.model: DiffusionTransformerHybridImagePolicy = hydra.utils.instantiate(cfg.policy)
+        self.model: DiffusionControlnetTransformerHybridImagePolicy = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: DiffusionTransformerHybridImagePolicy = None
+        self.ema_model: DiffusionControlnetTransformerHybridImagePolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
