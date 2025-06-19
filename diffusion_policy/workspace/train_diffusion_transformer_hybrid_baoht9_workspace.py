@@ -14,26 +14,24 @@ from omegaconf import OmegaConf
 import pathlib
 from torch.utils.data import DataLoader
 import copy
-import numpy as np
 import random
 import wandb
 import tqdm
+import numpy as np
 import shutil
-
-from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from diffusion_policy.policy.diffusion_unet_lowdim_policy import DiffusionUnetLowdimPolicy
-from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
-from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
+from diffusion_policy.policy.diffusion_transformer_hybrid_image_policy import DiffusionTransformerHybridImagePolicy
+from diffusion_policy.dataset.base_dataset import BaseImageDataset
+from diffusion_policy.env_runner.base_image_runner import BaseImageRunner
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
+from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
+from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
-from diffusers.training_utils import EMAModel
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
-# %%
-class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
+class TrainDiffusionTransformerHybridWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -46,17 +44,16 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         random.seed(seed)
 
         # configure model
-        self.model: DiffusionUnetLowdimPolicy
-        self.model = hydra.utils.instantiate(cfg.policy)
+        self.model: DiffusionTransformerHybridImagePolicy = hydra.utils.instantiate(cfg.policy)
 
-        self.ema_model: DiffusionUnetLowdimPolicy = None
+        self.ema_model: DiffusionTransformerHybridImagePolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
 
         # configure training state
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
+        self.optimizer = self.model.get_optimizer(**cfg.optimizer)
 
+        # configure training state
         self.global_step = 0
         self.epoch = 0
 
@@ -71,9 +68,9 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 self.load_checkpoint(path=lastest_ckpt_path)
 
         # configure dataset
-        dataset: BaseLowdimDataset
+        dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseLowdimDataset)
+        assert isinstance(dataset, BaseImageDataset)
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
@@ -105,12 +102,12 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 cfg.ema,
                 model=self.ema_model)
 
-        # configure env runner
-        env_runner: BaseLowdimRunner
+        # configure env
+        env_runner: BaseImageRunner
         env_runner = hydra.utils.instantiate(
             cfg.task.env_runner,
             output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseLowdimRunner)
+        assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -136,7 +133,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
-
+        
         # save batch for sampling
         train_sampling_batch = None
 
@@ -148,7 +145,6 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
-
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -201,7 +197,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                         if (cfg.training.max_train_steps is not None) \
                             and batch_idx >= (cfg.training.max_train_steps-1):
                             break
-                
+
                 # at the end of each epoch
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
@@ -241,22 +237,14 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
-                        batch = train_sampling_batch
-                        obs_dict = {'obs': batch['obs']}
+                        batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
+                        obs_dict = batch['obs']
                         gt_action = batch['action']
                         
                         result = policy.predict_action(obs_dict)
-                        if cfg.pred_action_steps_only:
-                            pred_action = result['action']
-                            start = cfg.n_obs_steps - 1
-                            end = start + cfg.n_action_steps
-                            gt_action = gt_action[:,start:end]
-                        else:
-                            pred_action = result['action_pred']
+                        pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                        # log
                         step_log['train_action_mse_error'] = mse.item()
-                        # release RAM
                         del batch
                         del obs_dict
                         del gt_action
@@ -300,7 +288,7 @@ class TrainDiffusionUnetLowdimWorkspace(BaseWorkspace):
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")), 
     config_name=pathlib.Path(__file__).stem)
 def main(cfg):
-    workspace = TrainDiffusionUnetLowdimWorkspace(cfg)
+    workspace = TrainDiffusionTransformerHybridWorkspace(cfg)
     workspace.run()
 
 if __name__ == "__main__":
