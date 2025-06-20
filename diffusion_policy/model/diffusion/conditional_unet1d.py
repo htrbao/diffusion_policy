@@ -67,7 +67,7 @@ class ConditionalResidualBlock1D(nn.Module):
 
 
 class ConditionalUnet1D(nn.Module):
-    def __init__(self, 
+    def __init__(self,
         input_dim,
         local_cond_dim=None,
         global_cond_dim=None,
@@ -240,3 +240,241 @@ class ConditionalUnet1D(nn.Module):
         x = einops.rearrange(x, 'b t h -> b h t')
         return x
 
+class ControlNet(nn.Module):
+    """
+    input x : [bs, dim_x, window_size]
+    """
+
+    def __init__(self,
+        input_dim,
+        local_cond_dim=None,
+        global_cond_dim=None,
+        diffusion_step_embed_dim=256,
+        down_dims=[256,512,1024],
+        kernel_size=3,
+        n_groups=8,
+        ):
+        super().__init__()
+        all_dims = [input_dim] + list(down_dims)
+        start_dim = down_dims[0]
+
+        dsed = diffusion_step_embed_dim
+
+        self.kernel_size = kernel_size
+        self.n_groups = n_groups
+
+        dim_mults = (1, 2, 4, 8)
+        dims = [dim_x, *map(lambda m: self.time_dim * m, dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+
+        """
+        positional embedding for t
+        """
+        self.time_mlp = nn.Sequential( # copy: diffusion_step_encoder
+            SinusoidalPosEmb(dsed),
+            nn.Linear(dsed, dsed * 4),
+            nn.Mish(),
+            # nn.ReLU(),
+            nn.Linear(dsed * 4, dsed),
+        )
+
+        # -------------------------------------------------------------------#
+        # ---------------------------- U-Net model --------------------------#
+        # -------------------------------------------------------------------#
+
+        """
+        define encoder 
+        """
+        self.downs = nn.ModuleList([])
+        self.ups = nn.ModuleList([])
+        num_resolutions = len(in_out)
+        cond_dim = dsed
+
+        # print(in_out)
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+
+            self.downs.append(
+                nn.ModuleList(
+                    [
+                        ConditionalResidualBlock1D(
+                            dim_in,
+                            dim_out,
+                            cond_dim=self.embed_size * 2
+                        ),
+                        ConditionalResidualBlock1D(
+                            dim_out,
+                            dim_out,
+                            cond_dim=self.embed_size * 2
+                        ),
+                        Downsample1d(dim_out) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
+
+        """
+        define bottle neck
+        """
+        mid_dim = dims[-1]
+        self.mid_modules = nn.ModuleList([
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
+            ),
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
+            ),
+        ])
+
+        """
+        define decoder
+        """
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = ind >= (num_resolutions - 1)
+            self.ups.append(
+                nn.ModuleList(
+                    [
+                        ConditionalResidualBlock1D(
+                            dim_out * 2,
+                            dim_in,
+                            cond_dim=self.embed_size * 2
+                        ),
+                        ConditionalResidualBlock1D(
+                            dim_in,
+                            dim_in,
+                            cond_dim=self.embed_size * 2
+                        ),
+                        Upsample1d(dim_in) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
+
+        """
+        output layer
+        """
+        self.final_conv = nn.Sequential(
+            Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
+            nn.Conv1d(start_dim, input_dim, 1),
+        )
+
+        # -------------------------------------------------------------#
+        # -------------------------- ControlNet -----------------------#
+        # -------------------------------------------------------------#
+        """
+        define encoder 
+        """
+        self.copy_downs = nn.ModuleList([])
+        num_resolutions = len(in_out)
+
+        # print(in_out)
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+
+            self.copy_downs.append(
+                nn.ModuleList(
+                    [
+                        ConditionalResidualBlock1D(
+                            dim_in,
+                            dim_out,
+                            cond_dim=cond_dim
+                        ),
+                        ConditionalResidualBlock1D(
+                            dim_out,
+                            dim_out,
+                            cond_dim=cond_dim
+                        ),
+                        Downsample1d(dim_out) if not is_last else nn.Identity(),
+                    ]
+                )
+            )
+
+        """
+        define bottle neck
+        """
+        mid_dim = dims[-1]
+        self.copy_mid_block = nn.ModuleList([
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups
+            ),
+            ConditionalResidualBlock1D(
+                mid_dim, mid_dim, cond_dim=cond_dim,
+                kernel_size=kernel_size, n_groups=n_groups
+            ),
+        ])
+
+        """
+        define zero conv
+        """
+        self.mid_controlnet_block = self.zero_module(
+            nn.Conv1d(mid_dim, mid_dim, kernel_size=1)
+        )
+
+        self.controlnet_blocks = nn.ModuleList([])
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+            self.controlnet_blocks.append(
+                self.zero_module(nn.Conv1d(dim_out * 2, dim_in, 1))
+            )
+
+    def zero_module(self, module):
+        for p in module.parameters():
+            nn.init.zeros_(p)
+        return module
+
+    def forward(self, x, obs, lang, control_input, time):
+        """
+        add regular conditions
+        """
+        t = self.time_mlp(time)
+
+        input_x = x
+
+        """
+        base model encoder
+        """
+        h = []
+        for resnet, resnet2, downsample in self.downs:
+            x = resnet(x, t)
+            x = resnet2(x, t)
+            h.append(x)
+            x = downsample(x)
+        x = self.mid_modules(x, t)
+
+        """
+        controlnet encoder
+        """
+        x_hat = control_input + input_x
+        h_hat = []
+        for resnet, resnet2, downsample in self.copy_downs:
+            x_hat = resnet(x_hat, t)
+            x_hat = resnet2(x_hat, t)
+            h_hat.append(x_hat)
+            x_hat = downsample(x_hat)
+        x_hat = self.copy_mid_block(x_hat, t)
+
+        """
+        add feature for the middle blocks
+        """
+        x_hat = self.mid_controlnet_block(x_hat)
+        x = x + x_hat
+
+        """
+        base model decoder + controlnet feature
+        """
+        for resnet, resnet2, upsample in self.ups:
+            # print("---")
+            x = x + h_hat.pop()
+            x = torch.cat((x, h.pop()), dim=1)
+            # print(x.shape)
+            x = resnet(x, t)
+            # print(x.shape)
+            x = resnet2(x, t)
+            # print(x.shape)
+            x = upsample(x)
+            # print(x.shape)
+        x_out = self.final_conv(x)
+        return x_out

@@ -7,10 +7,10 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
 from diffusion_policy.model.common.normalizer import LinearNormalizer
-from diffusion_policy.dataset.base_dataset import BaseImageDataset
+from diffusion_policy.dataset.pusht_image_dataset import BaseImageDataset
 from diffusion_policy.common.normalize_util import get_image_range_normalizer
 
-class PushTImageDataset(BaseImageDataset):
+class PushTImageControlnetDataset(BaseImageDataset):
     def __init__(self,
             zarr_path, 
             horizon=1,
@@ -39,7 +39,8 @@ class PushTImageDataset(BaseImageDataset):
             sequence_length=horizon,
             pad_before=pad_before, 
             pad_after=pad_after,
-            episode_mask=train_mask)
+            episode_mask=train_mask,
+            get_previous_action=True)
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
@@ -52,7 +53,8 @@ class PushTImageDataset(BaseImageDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=~self.train_mask,
+            get_previous_action=True
             )
         val_set.train_mask = ~self.train_mask
         return val_set
@@ -72,12 +74,14 @@ class PushTImageDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         agent_pos = sample['state'][:,:2].astype(np.float32) # (agent_posx2, block_posex3)
+        past_action = sample['past_action'].astype(np.float32) # T, 2
         image = np.moveaxis(sample['img'],-1,1)/255
 
         data = {
             'obs': {
                 'image': image, # T, 3, 96, 96
                 'agent_pos': agent_pos, # T, 2
+                'past_action': past_action, # T, 2
             },
             'action': sample['action'].astype(np.float32) # T, 2
         }
@@ -87,20 +91,24 @@ class PushTImageDataset(BaseImageDataset):
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
-
-        prev_sample = self.sampler.sample_sequence(idx - 1)
-        prev_data = self._sample_to_data(prev_sample)
-        torch_data["past_action"] = prev_data['action']
         return torch_data
 
 
 def test():
     import os
-    zarr_path = os.path.expanduser('~/dev/diffusion_policy/data/pusht/pusht_cchi_v7_replay.zarr')
-    dataset = PushTImageDataset(zarr_path, horizon=16)
+    zarr_path = os.path.expanduser('/home/khai/Documents/baoht9/diffusion_policy/data/pusht/pusht_cchi_v7_replay.zarr')
+    dataset = PushTImageControlnetDataset(zarr_path, horizon=16)
+
+    for x in dataset:
+        # continue
+        print(x['obs']['image'].shape, x['obs']['agent_pos'].shape, x['action'].shape)
+        print(x['obs']['past_action'].shape)
 
     # from matplotlib import pyplot as plt
     # normalizer = dataset.get_normalizer()
     # nactions = normalizer['action'].normalize(dataset.replay_buffer['action'])
     # diff = np.diff(nactions, axis=0)
     # dists = np.linalg.norm(np.diff(nactions, axis=0), axis=-1)
+
+if __name__ == "__main__":
+    test()

@@ -9,7 +9,8 @@ def create_indices(
     episode_ends:np.ndarray, sequence_length:int, 
     episode_mask: np.ndarray,
     pad_before: int=0, pad_after: int=0,
-    debug:bool=True) -> np.ndarray:
+    debug:bool=True,
+    get_previous_action:bool=False) -> np.ndarray:
     episode_mask.shape == episode_ends.shape        
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
@@ -43,6 +44,12 @@ def create_indices(
             indices.append([
                 buffer_start_idx, buffer_end_idx, 
                 sample_start_idx, sample_end_idx])
+            if get_previous_action:
+                if buffer_start_idx - sequence_length - 1 >= 0:
+                    # if we can get previous action, add it
+                    indices[-1].extend([buffer_start_idx - sequence_length - 1, buffer_end_idx - sequence_length - 1])
+                else:
+                    indices[-1].extend([0, 0])
     indices = np.array(indices)
     return indices
 
@@ -83,6 +90,7 @@ class SequenceSampler:
         keys=None,
         key_first_k=dict(),
         episode_mask: Optional[np.ndarray]=None,
+        get_previous_action:bool=False
         ):
         """
         key_first_k: dict str: int
@@ -103,7 +111,8 @@ class SequenceSampler:
                 sequence_length=sequence_length, 
                 pad_before=pad_before, 
                 pad_after=pad_after,
-                episode_mask=episode_mask
+                episode_mask=episode_mask,
+                get_previous_action=get_previous_action,
                 )
         else:
             indices = np.zeros((0,4), dtype=np.int64)
@@ -114,13 +123,18 @@ class SequenceSampler:
         self.sequence_length = sequence_length
         self.replay_buffer = replay_buffer
         self.key_first_k = key_first_k
+        self.get_previous_action = get_previous_action
     
     def __len__(self):
         return len(self.indices)
         
     def sample_sequence(self, idx):
-        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
-            = self.indices[idx]
+        if not self.get_previous_action:
+            buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx \
+                = self.indices[idx]
+        else:
+            buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx, past_buffer_start_idx, past_buffer_end_idx \
+                = self.indices[idx]
         result = dict()
         for key in self.keys:
             input_arr = self.replay_buffer[key]
@@ -150,4 +164,13 @@ class SequenceSampler:
                     data[sample_end_idx:] = sample[-1]
                 data[sample_start_idx:sample_end_idx] = sample
             result[key] = data
+
+            if self.get_previous_action:
+                if past_buffer_start_idx == past_buffer_end_idx == 0:
+                    result['past_action'] = np.zeros((self.sequence_length, 2), dtype=self.replay_buffer['action'].dtype)
+                else:
+                    result['past_action'] = self.replay_buffer['action'][past_buffer_start_idx:past_buffer_end_idx]
+
+                    if result['past_action'].shape[0] != self.sequence_length:
+                        result['past_action'] = np.pad(result['past_action'], ((0, self.sequence_length - result['past_action'].shape[0]), (0, 0)), mode='constant')
         return result
