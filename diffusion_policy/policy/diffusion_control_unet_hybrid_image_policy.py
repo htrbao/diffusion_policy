@@ -152,6 +152,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
             down_dims=down_dims,
             kernel_size=kernel_size,
             n_groups=n_groups,
+            cond_predict_scale=cond_predict_scale
         )
 
         self.obs_encoder = obs_encoder
@@ -180,6 +181,39 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
 
         print("Diffusion params: %e" % sum(p.numel() for p in self.model.parameters()))
         print("Vision params: %e" % sum(p.numel() for p in self.obs_encoder.parameters()))
+
+    def copy_param_to_controlnet(self):
+        """
+        Copy parameters from the main model to the controlnet model.
+        This is useful for initializing the controlnet model with the same parameters as the main model.
+        """
+           
+        """
+        make the copy of the base model and lock it
+        """
+        self.controlnet_model.local_cond_encoder.load_state_dict(
+            self.model.local_cond_encoder.state_dict()
+        )
+        self.controlnet_model.time_mlp.load_state_dict(self.model.diffusion_step_encoder.state_dict())
+        self.controlnet_model.downs.load_state_dict(self.model.down_modules.state_dict())
+        self.controlnet_model.mid_controlnet_block.load_state_dict(
+            self.model.mid_modules.state_dict()
+        )
+        self.controlnet_model.ups.load_state_dict(self.model.up_modules.state_dict())
+        self.controlnet_model.final_conv.load_state_dict(
+            self.model.final_conv.state_dict()
+        )
+
+        """
+        make the trainable copy of the base model
+        """
+        self.controlnet_model.copy_downs.load_state_dict(self.model.down_modules.state_dict())
+        self.controlnet_model.copy_mid_block.load_state_dict(
+            self.model.mid_modules.state_dict()
+        )
+
+        self.model.eval()
+
     
     # ========= inference  ============
     def conditional_sample(self, 
@@ -296,6 +330,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         assert 'valid_mask' not in batch
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
+        npast_action = self.normalizer['action'].normalize(batch['past_action'])
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
 
@@ -303,6 +338,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         local_cond = None
         global_cond = None
         trajectory = nactions
+        control_input = npast_action
         cond_data = trajectory
         if self.obs_as_global_cond:
             # reshape B, T, ... to B*T
@@ -343,8 +379,8 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
         
         # Predict the noise residual
-        pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond)
+        pred = self.controlnet_model(noisy_trajectory, timesteps, 
+            local_cond=local_cond, global_cond=global_cond, control_input=control_input)
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':

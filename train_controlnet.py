@@ -39,6 +39,7 @@ def main(cfg: OmegaConf):
     workspace = cls(cfg)
     workspace: BaseWorkspace
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+    workspace.copy_to_controlnet()
     
     # get policy from workspace
     policy = workspace.model

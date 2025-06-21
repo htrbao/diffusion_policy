@@ -159,6 +159,7 @@ task:
         type: rgb
 task_name: pusht_image
 training:
+  controlnet: true
   checkpoint_every: 50
   debug: false
   device: cuda:0

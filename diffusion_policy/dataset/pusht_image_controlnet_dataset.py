@@ -62,7 +62,8 @@ class PushTImageControlnetDataset(BaseImageDataset):
     def get_normalizer(self, mode='limits', **kwargs):
         data = {
             'action': self.replay_buffer['action'],
-            'agent_pos': self.replay_buffer['state'][...,:2]
+            'agent_pos': self.replay_buffer['state'][...,:2],
+            'past_action': self.replay_buffer['action'],
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
@@ -81,8 +82,8 @@ class PushTImageControlnetDataset(BaseImageDataset):
             'obs': {
                 'image': image, # T, 3, 96, 96
                 'agent_pos': agent_pos, # T, 2
-                'past_action': past_action, # T, 2
             },
+            'past_action': past_action, # T, 2
             'action': sample['action'].astype(np.float32) # T, 2
         }
         return data

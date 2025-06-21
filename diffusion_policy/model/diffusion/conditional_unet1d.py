@@ -242,7 +242,7 @@ class ConditionalUnet1D(nn.Module):
 
 class ControlNet(nn.Module):
     """
-    input x : [bs, dim_x, window_size]
+    input x : [bs, start_dim, window_size]
     """
 
     def __init__(self,
@@ -253,20 +253,13 @@ class ControlNet(nn.Module):
         down_dims=[256,512,1024],
         kernel_size=3,
         n_groups=8,
+        cond_predict_scale=False
         ):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
 
         dsed = diffusion_step_embed_dim
-
-        self.kernel_size = kernel_size
-        self.n_groups = n_groups
-
-        dim_mults = (1, 2, 4, 8)
-        dims = [dim_x, *map(lambda m: self.time_dim * m, dim_mults)]
-        in_out = list(zip(dims[:-1], dims[1:]))
-
         """
         positional embedding for t
         """
@@ -285,12 +278,34 @@ class ControlNet(nn.Module):
         """
         define encoder 
         """
+
+        cond_dim = dsed
+        if global_cond_dim is not None:
+            cond_dim += global_cond_dim
+
+        in_out = list(zip(all_dims[:-1], all_dims[1:]))
+
+        local_cond_encoder = None
+        if local_cond_dim is not None:
+            _, dim_out = in_out[0]
+            dim_in = local_cond_dim
+            local_cond_encoder = nn.ModuleList([
+                # down encoder
+                ConditionalResidualBlock1D(
+                    dim_in, dim_out, cond_dim=cond_dim, 
+                    kernel_size=kernel_size, n_groups=n_groups,
+                    cond_predict_scale=cond_predict_scale),
+                # up encoder
+                ConditionalResidualBlock1D(
+                    dim_in, dim_out, cond_dim=cond_dim, 
+                    kernel_size=kernel_size, n_groups=n_groups,
+                    cond_predict_scale=cond_predict_scale),
+            ])
+
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
-        cond_dim = dsed
 
-        # print(in_out)
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
@@ -298,15 +313,13 @@ class ControlNet(nn.Module):
                 nn.ModuleList(
                     [
                         ConditionalResidualBlock1D(
-                            dim_in,
-                            dim_out,
-                            cond_dim=self.embed_size * 2
-                        ),
+                            dim_in, dim_out, cond_dim=cond_dim, 
+                            kernel_size=kernel_size, n_groups=n_groups,
+                            cond_predict_scale=cond_predict_scale),
                         ConditionalResidualBlock1D(
-                            dim_out,
-                            dim_out,
-                            cond_dim=self.embed_size * 2
-                        ),
+                            dim_out, dim_out, cond_dim=cond_dim, 
+                            kernel_size=kernel_size, n_groups=n_groups,
+                            cond_predict_scale=cond_predict_scale),
                         Downsample1d(dim_out) if not is_last else nn.Identity(),
                     ]
                 )
@@ -315,7 +328,7 @@ class ControlNet(nn.Module):
         """
         define bottle neck
         """
-        mid_dim = dims[-1]
+        mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList([
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
@@ -335,21 +348,17 @@ class ControlNet(nn.Module):
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
             self.ups.append(
-                nn.ModuleList(
-                    [
-                        ConditionalResidualBlock1D(
-                            dim_out * 2,
-                            dim_in,
-                            cond_dim=self.embed_size * 2
-                        ),
-                        ConditionalResidualBlock1D(
-                            dim_in,
-                            dim_in,
-                            cond_dim=self.embed_size * 2
-                        ),
-                        Upsample1d(dim_in) if not is_last else nn.Identity(),
-                    ]
-                )
+                nn.ModuleList([
+                ConditionalResidualBlock1D(
+                    dim_out*2, dim_in, cond_dim=cond_dim,
+                    kernel_size=kernel_size, n_groups=n_groups,
+                    cond_predict_scale=cond_predict_scale),
+                ConditionalResidualBlock1D(
+                    dim_in, dim_in, cond_dim=cond_dim,
+                    kernel_size=kernel_size, n_groups=n_groups,
+                    cond_predict_scale=cond_predict_scale),
+                Upsample1d(dim_in) if not is_last else nn.Identity()
+                ])
             )
 
         """
@@ -369,7 +378,6 @@ class ControlNet(nn.Module):
         self.copy_downs = nn.ModuleList([])
         num_resolutions = len(in_out)
 
-        # print(in_out)
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
@@ -377,15 +385,13 @@ class ControlNet(nn.Module):
                 nn.ModuleList(
                     [
                         ConditionalResidualBlock1D(
-                            dim_in,
-                            dim_out,
-                            cond_dim=cond_dim
-                        ),
+                            dim_in, dim_out, cond_dim=cond_dim, 
+                            kernel_size=kernel_size, n_groups=n_groups,
+                            cond_predict_scale=cond_predict_scale),
                         ConditionalResidualBlock1D(
-                            dim_out,
-                            dim_out,
-                            cond_dim=cond_dim
-                        ),
+                            dim_out, dim_out, cond_dim=cond_dim, 
+                            kernel_size=kernel_size, n_groups=n_groups,
+                            cond_predict_scale=cond_predict_scale),
                         Downsample1d(dim_out) if not is_last else nn.Identity(),
                     ]
                 )
@@ -394,15 +400,17 @@ class ControlNet(nn.Module):
         """
         define bottle neck
         """
-        mid_dim = dims[-1]
+        mid_dim = all_dims[-1]
         self.copy_mid_block = nn.ModuleList([
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
-                kernel_size=kernel_size, n_groups=n_groups
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
             ),
             ConditionalResidualBlock1D(
                 mid_dim, mid_dim, cond_dim=cond_dim,
-                kernel_size=kernel_size, n_groups=n_groups
+                kernel_size=kernel_size, n_groups=n_groups,
+                cond_predict_scale=cond_predict_scale
             ),
         ])
 
@@ -420,41 +428,90 @@ class ControlNet(nn.Module):
                 self.zero_module(nn.Conv1d(dim_out * 2, dim_in, 1))
             )
 
+        self.local_cond_encoder = local_cond_encoder
+
+        logger.info(
+            "number of parameters: %e", sum(p.numel() for p in self.parameters())
+        )
+
     def zero_module(self, module):
         for p in module.parameters():
             nn.init.zeros_(p)
         return module
 
-    def forward(self, x, obs, lang, control_input, time):
+    def forward(self, 
+            sample: torch.Tensor, 
+            timestep: Union[torch.Tensor, float, int], 
+            local_cond=None, global_cond=None, **kwargs):
         """
-        add regular conditions
+        x: (B,T,input_dim)
+        timestep: (B,) or int, diffusion step
+        local_cond: (B,T,local_cond_dim)
+        global_cond: (B,global_cond_dim)
+        output: (B,T,input_dim)
         """
-        t = self.time_mlp(time)
+        control_input = kwargs.get('control_input', None)
 
-        input_x = x
+        sample = einops.rearrange(sample, 'b h t -> b t h')
+        control_input = einops.rearrange(control_input, 'b h t -> b t h')
+
+        # 1. time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            timesteps = torch.tensor([timesteps], dtype=torch.long, device=sample.device)
+        elif torch.is_tensor(timesteps) and len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps.expand(sample.shape[0])
+
+        global_feature = self.time_mlp(timesteps)
+
+        if global_cond is not None:
+            global_feature = torch.cat([
+                global_feature, global_cond
+            ], axis=-1)
+        
+        # encode local features
+        h_local = list()
+        if local_cond is not None:
+            local_cond = einops.rearrange(local_cond, 'b h t -> b t h')
+            resnet, resnet2 = self.local_cond_encoder
+            x = resnet(local_cond, global_feature)
+            h_local.append(x)
+            x = resnet2(local_cond, global_feature)
+            h_local.append(x)
 
         """
         base model encoder
         """
+        x = sample
         h = []
-        for resnet, resnet2, downsample in self.downs:
-            x = resnet(x, t)
-            x = resnet2(x, t)
+        for idx, (resnet, resnet2, downsample) in enumerate(self.downs):
+            x = resnet(x, global_feature)
+            if idx == 0 and len(h_local) > 0:
+                x = x + h_local[0]
+            x = resnet2(x, global_feature)
             h.append(x)
             x = downsample(x)
-        x = self.mid_modules(x, t)
+            
+        for mid_module in self.mid_modules:
+            x = mid_module(x, global_feature)
 
         """
         controlnet encoder
         """
-        x_hat = control_input + input_x
+        x_hat = control_input + sample
         h_hat = []
-        for resnet, resnet2, downsample in self.copy_downs:
-            x_hat = resnet(x_hat, t)
-            x_hat = resnet2(x_hat, t)
+        for idx, (resnet, resnet2, downsample) in enumerate(self.copy_downs):
+            x_hat = resnet(x_hat, global_feature)
+            if idx == 0 and len(h_local) > 0:
+                x_hat = x_hat + h_local[0]
+            x_hat = resnet2(x_hat, global_feature)
             h_hat.append(x_hat)
             x_hat = downsample(x_hat)
-        x_hat = self.copy_mid_block(x_hat, t)
+        for mid_module in self.copy_mid_block:
+            x_hat = mid_module(x_hat, global_feature)
 
         """
         add feature for the middle blocks
@@ -465,16 +522,20 @@ class ControlNet(nn.Module):
         """
         base model decoder + controlnet feature
         """
-        for resnet, resnet2, upsample in self.ups:
-            # print("---")
+        for idx, (resnet, resnet2, upsample) in enumerate(self.ups):
             x = x + h_hat.pop()
             x = torch.cat((x, h.pop()), dim=1)
-            # print(x.shape)
-            x = resnet(x, t)
-            # print(x.shape)
-            x = resnet2(x, t)
-            # print(x.shape)
+            x = resnet(x, global_feature)
+            # The correct condition should be:
+            # if idx == (len(self.up_modules)-1) and len(h_local) > 0:
+            # However this change will break compatibility with published checkpoints.
+            # Therefore it is left as a comment.
+            if idx == (len(self.ups) - 1) and len(h_local) > 0:
+                x = x + h_local[1]
+            x = resnet2(x, global_feature)
             x = upsample(x)
-            # print(x.shape)
-        x_out = self.final_conv(x)
-        return x_out
+
+        x = self.final_conv(x)
+
+        x = einops.rearrange(x, 'b t h -> b h t')
+        return x
