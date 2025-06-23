@@ -167,7 +167,7 @@ class SequenceSampler:
 
             if self.get_previous_action:
                 if past_buffer_start_idx == past_buffer_end_idx == 0:
-                    result['past_action'] = np.zeros((self.sequence_length, 2), dtype=self.replay_buffer['action'].dtype)
+                    result['past_action'] = None
                 else:
                     result['past_action'] = self.replay_buffer['action'][past_buffer_start_idx:past_buffer_end_idx]
 

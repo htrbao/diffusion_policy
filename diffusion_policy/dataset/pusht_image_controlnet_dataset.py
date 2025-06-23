@@ -75,7 +75,9 @@ class PushTImageControlnetDataset(BaseImageDataset):
 
     def _sample_to_data(self, sample):
         agent_pos = sample['state'][:,:2].astype(np.float32) # (agent_posx2, block_posex3)
-        past_action = sample['past_action'].astype(np.float32) # T, 2
+        past_action = None
+        if sample['past_action'] is not None:
+            past_action = sample['past_action'].astype(np.float32) # T, 2
         image = np.moveaxis(sample['img'],-1,1)/255
 
         data = {

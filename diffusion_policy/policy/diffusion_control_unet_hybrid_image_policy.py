@@ -191,12 +191,14 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         """
         make the copy of the base model and lock it
         """
-        self.controlnet_model.local_cond_encoder.load_state_dict(
-            self.model.local_cond_encoder.state_dict()
-        )
+        # self.controlnet_model.local_cond_encoder.load_state_dict(
+        #     self.model.local_cond_encoder.state_dict()
+        # )
+        #check if state_dicts are the same
+
         self.controlnet_model.time_mlp.load_state_dict(self.model.diffusion_step_encoder.state_dict())
         self.controlnet_model.downs.load_state_dict(self.model.down_modules.state_dict())
-        self.controlnet_model.mid_controlnet_block.load_state_dict(
+        self.controlnet_model.copy_mid_block.load_state_dict(
             self.model.mid_modules.state_dict()
         )
         self.controlnet_model.ups.load_state_dict(self.model.up_modules.state_dict())
@@ -221,6 +223,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
             local_cond=None, global_cond=None,
             generator=None,
             # keyword arguments to scheduler.step
+            past_action=None,
             **kwargs
             ):
         model = self.model
@@ -241,7 +244,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
 
             # 2. predict model output
             model_output = model(trajectory, t, 
-                local_cond=local_cond, global_cond=global_cond)
+                local_cond=local_cond, global_cond=global_cond, control_input=past_action)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -256,7 +259,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(self, obs_dict: Dict[str, torch.Tensor], past_action: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -264,6 +267,8 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         assert 'past_action' not in obs_dict # not implemented yet
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
+        if past_action is not None:
+            past_action = self.normalizer['action'].normalize(past_action)
         value = next(iter(nobs.values()))
         B, To = value.shape[:2]
         T = self.horizon
@@ -304,6 +309,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
             cond_mask,
             local_cond=local_cond,
             global_cond=global_cond,
+            past_action=past_action,
             **self.kwargs)
         
         # unnormalize prediction

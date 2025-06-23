@@ -85,6 +85,21 @@ class BaseWorkspace:
         for key in include_keys:
             if key in payload['pickles']:
                 self.__dict__[key] = dill.loads(payload['pickles'][key])
+
+    def load_payload_for_controlnet(self, payload):
+        """
+        Load payload for controlnet, which has different keys.
+        """
+        exclude_keys = ('model', 'ema_model', 'optimizer', 'scheduler')
+
+        for key, value in payload['state_dicts']['model'].items():
+            try: 
+                if not key.startswith('controlnet_model.'):
+                    # controlnet model
+                    self.__dict__['model'].state_dict()[key].copy_(value)
+            except Exception as e:
+                print(f"Failed to load key {key} from controlnet model: {e}")
+                continue
     
     def load_checkpoint(self, path=None, tag='latest',
             exclude_keys=None, 

@@ -188,6 +188,9 @@ class PushTImageRunner(BaseImageRunner):
                     # TODO: not tested
                     np_obs_dict['past_action'] = past_action[
                         :,-(self.n_obs_steps-1):].astype(np.float32)
+                if past_action is not None:
+                    past_action = past_action[:,-(self.n_action_steps-1):].astype(np.float32)
+                    past_action = None
                 
                 # device transfer
                 obs_dict = dict_apply(np_obs_dict, 
@@ -196,7 +199,7 @@ class PushTImageRunner(BaseImageRunner):
 
                 # run policy
                 with torch.no_grad():
-                    action_dict = policy.predict_action(obs_dict)
+                    action_dict = policy.predict_action(obs_dict, past_action=past_action)
 
                 # device_transfer
                 np_action_dict = dict_apply(action_dict,

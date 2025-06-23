@@ -453,7 +453,8 @@ class ControlNet(nn.Module):
         control_input = kwargs.get('control_input', None)
 
         sample = einops.rearrange(sample, 'b h t -> b t h')
-        control_input = einops.rearrange(control_input, 'b h t -> b t h')
+        if control_input is not None:
+            control_input = einops.rearrange(control_input, 'b h t -> b t h')
 
         # 1. time
         timesteps = timestep
@@ -494,46 +495,59 @@ class ControlNet(nn.Module):
             x = resnet2(x, global_feature)
             h.append(x)
             x = downsample(x)
-            
+
         for mid_module in self.mid_modules:
             x = mid_module(x, global_feature)
 
-        """
-        controlnet encoder
-        """
-        x_hat = control_input + sample
-        h_hat = []
-        for idx, (resnet, resnet2, downsample) in enumerate(self.copy_downs):
-            x_hat = resnet(x_hat, global_feature)
-            if idx == 0 and len(h_local) > 0:
-                x_hat = x_hat + h_local[0]
-            x_hat = resnet2(x_hat, global_feature)
-            h_hat.append(x_hat)
-            x_hat = downsample(x_hat)
-        for mid_module in self.copy_mid_block:
-            x_hat = mid_module(x_hat, global_feature)
+        if control_input is not None:
+            """
+            controlnet encoder
+            """
+            x_hat = control_input + sample
+            h_hat = []
+            for idx, (resnet, resnet2, downsample) in enumerate(self.copy_downs):
+                x_hat = resnet(x_hat, global_feature)
+                if idx == 0 and len(h_local) > 0:
+                    x_hat = x_hat + h_local[0]
+                x_hat = resnet2(x_hat, global_feature)
+                h_hat.append(x_hat)
+                x_hat = downsample(x_hat)
+            for mid_module in self.copy_mid_block:
+                x_hat = mid_module(x_hat, global_feature)
 
-        """
-        add feature for the middle blocks
-        """
-        x_hat = self.mid_controlnet_block(x_hat)
-        x = x + x_hat
+            """
+            add feature for the middle blocks
+            """
+            x_hat = self.mid_controlnet_block(x_hat)
+            x = x + x_hat
 
-        """
-        base model decoder + controlnet feature
-        """
-        for idx, (resnet, resnet2, upsample) in enumerate(self.ups):
-            x = x + h_hat.pop()
-            x = torch.cat((x, h.pop()), dim=1)
-            x = resnet(x, global_feature)
-            # The correct condition should be:
-            # if idx == (len(self.up_modules)-1) and len(h_local) > 0:
-            # However this change will break compatibility with published checkpoints.
-            # Therefore it is left as a comment.
-            if idx == (len(self.ups) - 1) and len(h_local) > 0:
-                x = x + h_local[1]
-            x = resnet2(x, global_feature)
-            x = upsample(x)
+            """
+            base model decoder + controlnet feature
+            """
+            for idx, (resnet, resnet2, upsample) in enumerate(self.ups):
+                x = x + h_hat.pop()
+                x = torch.cat((x, h.pop()), dim=1)
+                x = resnet(x, global_feature)
+                # The correct condition should be:
+                # if idx == (len(self.up_modules)-1) and len(h_local) > 0:
+                # However this change will break compatibility with published checkpoints.
+                # Therefore it is left as a comment.
+                if idx == (len(self.ups) - 1) and len(h_local) > 0:
+                    x = x + h_local[1]
+                x = resnet2(x, global_feature)
+                x = upsample(x)
+        else:
+            for idx, (resnet, resnet2, upsample) in enumerate(self.ups):
+                x = torch.cat((x, h.pop()), dim=1)
+                x = resnet(x, global_feature)
+                # The correct condition should be:
+                # if idx == (len(self.up_modules)-1) and len(h_local) > 0:
+                # However this change will break compatibility with published checkpoints.
+                # Therefore it is left as a comment.
+                if idx == (len(self.ups) - 1) and len(h_local) > 0:
+                    x = x + h_local[1]
+                x = resnet2(x, global_feature)
+                x = upsample(x)
 
         x = self.final_conv(x)
 
