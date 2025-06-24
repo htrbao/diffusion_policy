@@ -85,9 +85,10 @@ class PushTImageControlnetDataset(BaseImageDataset):
                 'image': image, # T, 3, 96, 96
                 'agent_pos': agent_pos, # T, 2
             },
-            'past_action': past_action, # T, 2
             'action': sample['action'].astype(np.float32) # T, 2
         }
+        if past_action is not None:
+            data['past_action'] = past_action
         return data
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:

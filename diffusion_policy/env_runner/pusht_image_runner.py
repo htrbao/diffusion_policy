@@ -190,7 +190,6 @@ class PushTImageRunner(BaseImageRunner):
                         :,-(self.n_obs_steps-1):].astype(np.float32)
                 if past_action is not None:
                     past_action = past_action[:,-(self.n_action_steps-1):].astype(np.float32)
-                    past_action = None
                 
                 # device transfer
                 obs_dict = dict_apply(np_obs_dict, 

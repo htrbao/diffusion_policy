@@ -336,7 +336,9 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
         assert 'valid_mask' not in batch
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
-        npast_action = self.normalizer['action'].normalize(batch['past_action'])
+        npast_action = None
+        if 'past_action' in batch:
+            npast_action = self.normalizer['action'].normalize(batch['past_action'])
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
 
