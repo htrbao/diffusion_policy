@@ -1,118 +1,238 @@
-from typing import Dict
+import json
+import math
+import os
+import pathlib
+import functools
+import itertools
+import warnings
+import random
+
+from typing import Dict, List, Sequence, Tuple, Union, Optional, Callable
+
 import torch
-import numpy as np
-import copy
-from diffusion_policy.common.pytorch_util import dict_apply
-from diffusion_policy.common.replay_buffer import ReplayBuffer
-from diffusion_policy.common.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask)
-from diffusion_policy.model.common.normalizer import LinearNormalizer
-from diffusion_policy.dataset.pusht_image_dataset import BaseImageDataset
-from diffusion_policy.common.normalize_util import get_image_range_normalizer
+from torch.utils.data import Dataset, DataLoader
+import pyarrow.parquet as pq
+import pyarrow as pa
+from torchvision.io import read_video
 
-class LeRobotDataset(BaseImageDataset):
-    def __init__(self,
-            zarr_path, 
-            horizon=1,
-            pad_before=0,
-            pad_after=0,
-            seed=42,
-            val_ratio=0.0,
-            max_train_episodes=None
-            ):
-        
-        super().__init__()
-        self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=['img', 'state', 'action'])
-        val_mask = get_val_mask(
-            n_episodes=self.replay_buffer.n_episodes, 
-            val_ratio=val_ratio,
-            seed=seed)
-        train_mask = ~val_mask
-        train_mask = downsample_mask(
-            mask=train_mask, 
-            max_n=max_train_episodes, 
-            seed=seed)
 
-        self.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
-            sequence_length=horizon,
-            pad_before=pad_before, 
-            pad_after=pad_after,
-            episode_mask=train_mask,
-            get_previous_action=True)
-        self.train_mask = train_mask
-        self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
+def _load_jsonl(path: pathlib.Path):
+    with path.open() as f:
+        for line in f:
+            yield json.loads(line)
 
-    def get_validation_dataset(self):
-        val_set = copy.copy(self)
-        val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
-            sequence_length=self.horizon,
-            pad_before=self.pad_before, 
-            pad_after=self.pad_after,
-            episode_mask=~self.train_mask,
-            get_previous_action=True
-            )
-        val_set.train_mask = ~self.train_mask
-        return val_set
 
-    def get_normalizer(self, mode='limits', **kwargs):
-        data = {
-            'action': self.replay_buffer['action'],
-            'agent_pos': self.replay_buffer['state'][...,:2],
-            'past_action': self.replay_buffer['action'],
-        }
-        normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-        normalizer['image'] = get_image_range_normalizer()
-        return normalizer
+def _sec_to_frame(sec: float, fps: float) -> int:
+    return int(round(sec * fps))
 
-    def __len__(self) -> int:
-        return len(self.sampler)
 
-    def _sample_to_data(self, sample):
-        agent_pos = sample['state'][:,:2].astype(np.float32) # (agent_posx2, block_posex3)
-        past_action = None
-        if sample['past_action'] is not None:
-            past_action = sample['past_action'].astype(np.float32) # T, 2
-        image = np.moveaxis(sample['img'],-1,1)/255
+# ----------  the Dataset -----------------------------------------------------
 
-        data = {
-            'obs': {
-                'image': image, # T, 3, 96, 96
-                'agent_pos': agent_pos, # T, 2
-            },
-            'action': sample['action'].astype(np.float32) # T, 2
-        }
-        if past_action is not None:
-            data['past_action'] = past_action
-        return data
+
+class LeRobotDataset(Dataset):
+    """
+    Drop-in replacement for LeRobotDataset that only depends on
+    torch | torchvision | pyarrow.
+
+    One item = dict mapping each feature key to a torch.Tensor.
+    Images are (C,H,W). Other features keep the shape declared in meta.
+    """
+
+    def __init__(
+        self,
+        root: Union[str, os.PathLike],
+        *,
+        episodes: Optional[Sequence[int]] = None,
+        delta_timestamps: Optional[Dict[str, Sequence[float]]] = None,
+        transforms: Optional[Dict[str, Callable]] = None,
+        cache_video: bool = False,
+    ):
+        self.root = pathlib.Path(root).expanduser()
+        self.meta_dir = self.root / "meta"
+        self.data_dir = self.root / "data"
+        self.video_dir = self.root / "videos"
+
+        # --------- metadata ---------------------------------------------------
+        self.info = json.loads((self.meta_dir / "info.json").read_text())
+        self.fps: float = self.info["fps"]
+        self.features: Dict[str, dict] = self.info["features"]
+        self.code_version: str = self.info["codebase_version"]
+
+        # camera keys = all features declared as dtype=="video" or "image"
+        self.camera_keys = [
+            k for k, v in self.features.items() if v["dtype"] in ("video", "image")
+        ]
+
+        # episode index → file names & stats
+        self.episodes_meta = list(_load_jsonl(self.meta_dir / "episodes.jsonl"))
+        if episodes is not None:
+            selected = set(episodes)
+            self.episodes_meta = [
+                e for e in self.episodes_meta if e["episode_index"] in selected
+            ]
+
+        # build global frame index lookup
+        self._episode_parquets: List[pq.ParquetFile] = []
+        self._episode_ranges: List[Tuple[int, int]] = []  # (global_from, global_to)
+        running_total = 0
+        for ep in self.episodes_meta:
+            fn = f"episode_{ep['episode_index']:06d}.parquet"
+            chunk_dir = self.data_dir / "chunk-000"
+            pq_path = chunk_dir / fn
+            pf = pq.ParquetFile(pq_path)
+            num_rows = pf.metadata.num_rows
+            self._episode_parquets.append(pf)
+            self._episode_ranges.append((running_total, running_total + num_rows))
+            running_total += num_rows
+        self.num_frames = running_total
+        self.num_episodes = len(self.episodes_meta)
+
+        # options
+        self.delta_timestamps = delta_timestamps or {}
+        self.transforms = transforms or {}
+        self.cache_video = cache_video
+        self._video_cache = {}  # path → (video, audio, info)
+
+        # sanity
+        for k, dts in self.delta_timestamps.items():
+            step = 1.0 / self.fps
+            if any(abs(dt / step - round(dt / step)) > 1e-6 for dt in dts):
+                warnings.warn(f"delta_timestamps for '{k}' are not multiples of 1/fps")
+
+    # -------------- internal utils -------------------------------------------
+
+    def _find_episode_index(self, global_idx: int) -> Tuple[int, int]:
+        """return (episode_idx, local_frame_idx)"""
+        lo, hi = 0, len(self._episode_ranges) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            start, end = self._episode_ranges[mid]
+            if global_idx < start:
+                hi = mid - 1
+            elif global_idx >= end:
+                lo = mid + 1
+            else:
+                return mid, global_idx - start
+        raise IndexError(global_idx)
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.sampler.sample_sequence(idx)
-        data = self._sample_to_data(sample)
-        torch_data = dict_apply(data, torch.from_numpy)
-        return torch_data
+    def get_episode_chunk(self, ep_index: int) -> int:
+        """Get the chunk index for an episode index."""
+        return ep_index // self.info["chunks_size"]
+    
+    def get_video_path(self, episode_index: int, key: str) -> pathlib.Path:
+        chunk_index = self.get_episode_chunk(episode_index)
+        original_key = self.features[key].get("original_key", None)
+        if original_key is None:
+            original_key = key
+        video_filename = self.info["video_path"].format(
+            episode_chunk=chunk_index, episode_index=episode_index, video_key=original_key
+        )
+        return self.root / video_filename
 
+    @functools.lru_cache(maxsize=None)
+    def _load_parquet_row(self, episode_idx: int, row_idx: int) -> dict:
+        pf = self._episode_parquets[episode_idx]
+        table: pa.Table = pf.read_row_group(
+            0, columns=None, use_threads=False
+        )  # small row groups
+        batch = table.slice(row_idx, 1).to_pydict()
+        return {k: v[0] for k, v in batch.items()}
+
+    def _get_video_frame(self, path: pathlib.Path, t: float):
+        if self.cache_video and path in self._video_cache:
+            vid, _, info = self._video_cache[path]
+        else:
+            vid, _, info = read_video(str(path), pts_unit="sec")
+            if self.cache_video:
+                self._video_cache[path] = (vid, None, info)
+        fps = info["video_fps"]
+        frame_idx = _sec_to_frame(t, fps)
+        frame = vid[frame_idx]  # shape (H,W,C)
+        return frame.permute(2, 0, 1).contiguous()  # (C,H,W)
+
+    # -------------- public  ---------------------------------------------------
+
+    def __len__(self):
+        return self.num_frames
+
+    def __getitem__(self, idx: int):
+        episode_idx, local_idx = self._find_episode_index(idx)
+        row = self._load_parquet_row(episode_idx, local_idx)
+
+        out = {}
+        timestamp = row["timestamp"]
+        episode_index = row["episode_index"]
+
+        print(row)
+
+        def gather_feature(key: str, at_ts: float):
+            """Return torch.Tensor for one feature at the specified timestamp."""
+            if key in self.camera_keys:
+                p = self.get_video_path(episode_index, key)
+                t =  (at_ts - timestamp)
+                frame = self._get_video_frame(p, t)
+                return frame.float() / 255.0  # normalised
+            else:
+                arr = row[key]
+                tense = torch.as_tensor(arr)
+                return tense
+
+        for k in self.features.keys():
+            if k in self.delta_timestamps:
+                ts_list = self.delta_timestamps[k]
+                stacked = torch.stack(
+                    [gather_feature(k, timestamp + dt) for dt in ts_list]
+                )
+                out[k] = stacked
+            else:
+                out[k] = gather_feature(k, timestamp)
+
+            # user‑supplied transform?
+            if k in self.transforms:
+                out[k] = self.transforms[k](out[k])
+
+        return out
+
+
+# ----------  default collate_fn ---------------------------------------------
+
+
+def lerobot_collate(batch):
+    """Skip keys whose shapes disagree; useful with variable horizons."""
+    elem = batch[0]
+    out = {}
+    for k in elem.keys():
+        try:
+            out[k] = torch.stack([b[k] for b in batch])
+        except RuntimeError:
+            # fall back to list if shapes mismatch
+            out[k] = [b[k] for b in batch]
+    return out
+
+
+# ----------  usage -----------------------------------------------------------
 
 def test():
-    import os
-    zarr_path = os.path.expanduser('/home/khai/Documents/baoht9/diffusion_policy/data/pusht/pusht_cchi_v7_replay.zarr')
-    dataset = PushTImageControlnetDataset(zarr_path, horizon=16)
+    dataset_root = "data/G1_pick_ball_1606"  # <- change me
+    delta_ts = {
+        "observation.state": [-0.3, -0.2, -0.1, 0.0],  # history
+        "action": [0.0, 1 / 30, 2 / 30],  # short horizon
+    }
 
-    for x in dataset:
-        # continue
-        print(x['obs']['image'].shape, x['obs']['agent_pos'].shape, x['action'].shape)
-        print(x['obs']['past_action'].shape)
+    ds = LeRobotDataset(
+        dataset_root, delta_timestamps=delta_ts, cache_video=True
+    )
 
-    # from matplotlib import pyplot as plt
-    # normalizer = dataset.get_normalizer()
-    # nactions = normalizer['action'].normalize(dataset.replay_buffer['action'])
-    # diff = np.diff(nactions, axis=0)
-    # dists = np.linalg.norm(np.diff(nactions, axis=0), axis=-1)
+    for x in ds:
+        print(x)
+        # print(f"{k:30s} {v['dtype']:10s} {v['shape']}")
 
-if __name__ == "__main__":
-    test()
+    loader = DataLoader(
+        ds, batch_size=8, shuffle=True, num_workers=4, collate_fn=lerobot_collate
+    )
+
+    for batch in loader:
+        img = batch[ds.camera_keys[0]]  # (B, 1, C, H, W) if delta_timestamps given
+        state = batch["observation.state"]  # (B, 4, D)
+        action = batch["action"]  # (B, 3, D)
+        break
