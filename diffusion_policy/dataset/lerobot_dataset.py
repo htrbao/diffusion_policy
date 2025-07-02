@@ -9,11 +9,16 @@ import random
 
 from typing import Dict, List, Sequence, Tuple, Union, Optional, Callable
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pyarrow.parquet as pq
 import pyarrow as pa
 from torchvision.io import read_video
+
+from diffusion_policy.model.common.normalizer import LinearNormalizer
+from diffusion_policy.common.normalize_util import get_image_range_normalizer
+
 
 
 def _load_jsonl(path: pathlib.Path):
@@ -46,6 +51,7 @@ class LeRobotDataset(Dataset):
         delta_timestamps: Optional[Dict[str, Sequence[float]]] = None,
         transforms: Optional[Dict[str, Callable]] = None,
         cache_video: bool = False,
+        **kwargs: dict,
     ):
         self.root = pathlib.Path(root).expanduser()
         self.meta_dir = self.root / "meta"
@@ -88,7 +94,10 @@ class LeRobotDataset(Dataset):
         self.num_episodes = len(self.episodes_meta)
 
         # options
-        self.delta_timestamps = delta_timestamps or {}
+        self.delta_timestamps = {
+            "action": np.arange(16)[::-1] * -1,
+            "observation.state": [0]
+        }
         self.transforms = transforms or {}
         self.cache_video = cache_video
         self._video_cache = {}  # path → (video, audio, info)
@@ -100,6 +109,14 @@ class LeRobotDataset(Dataset):
                 warnings.warn(f"delta_timestamps for '{k}' are not multiples of 1/fps")
 
     # -------------- internal utils -------------------------------------------
+
+    def get_normalizer(self, mode='limits', **kwargs):
+        data = self.__getitem__(0)
+        data.pop('observation.images.head_cam')
+        normalizer = LinearNormalizer()
+        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        normalizer['observation.images.head_cam'] = get_image_range_normalizer()
+        return normalizer
 
     def _find_episode_index(self, global_idx: int) -> Tuple[int, int]:
         """return (episode_idx, local_frame_idx)"""
@@ -163,8 +180,6 @@ class LeRobotDataset(Dataset):
         timestamp = row["timestamp"]
         episode_index = row["episode_index"]
 
-        print(row)
-
         def gather_feature(key: str, at_ts: float):
             """Return torch.Tensor for one feature at the specified timestamp."""
             if key in self.camera_keys:
@@ -215,24 +230,23 @@ def lerobot_collate(batch):
 def test():
     dataset_root = "data/G1_pick_ball_1606"  # <- change me
     delta_ts = {
-        "observation.state": [-0.3, -0.2, -0.1, 0.0],  # history
-        "action": [0.0, 1 / 30, 2 / 30],  # short horizon
+        "observation.state": [0],  # history
+        "action": np.arange(16),  # short horizon
     }
 
     ds = LeRobotDataset(
         dataset_root, delta_timestamps=delta_ts, cache_video=True
     )
 
-    for x in ds:
-        print(x)
-        # print(f"{k:30s} {v['dtype']:10s} {v['shape']}")
 
     loader = DataLoader(
         ds, batch_size=8, shuffle=True, num_workers=4, collate_fn=lerobot_collate
     )
 
     for batch in loader:
+    #     print(batch)
         img = batch[ds.camera_keys[0]]  # (B, 1, C, H, W) if delta_timestamps given
         state = batch["observation.state"]  # (B, 4, D)
         action = batch["action"]  # (B, 3, D)
-        break
+        print(f"img: {img.shape}, state: {state.shape}, action: {action.shape}")
+    #     break
