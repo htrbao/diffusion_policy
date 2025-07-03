@@ -112,10 +112,13 @@ class LeRobotDataset(Dataset):
 
     def get_normalizer(self, mode='limits', **kwargs):
         data = self.__getitem__(0)
-        data.pop('observation.images.head_cam')
+        _data = {
+            "action": data["action"],
+            "state": data["obs"]["state"]
+        }
         normalizer = LinearNormalizer()
-        normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-        normalizer['observation.images.head_cam'] = get_image_range_normalizer()
+        normalizer.fit(data=_data, last_n_dims=1, mode=mode, **kwargs)
+        normalizer['image'] = get_image_range_normalizer()
         return normalizer
 
     def _find_episode_index(self, global_idx: int) -> Tuple[int, int]:
@@ -205,8 +208,16 @@ class LeRobotDataset(Dataset):
             # user‑supplied transform?
             if k in self.transforms:
                 out[k] = self.transforms[k](out[k])
+        
+        _out = {
+            'obs': {
+                'image': out["observation.images.head_cam"], # T, 3, 96, 96
+                'state': out["observation.state"], # T, len(state)
+            },
+            'action': out['action'] # T, len(action)
+        }
 
-        return out
+        return _out
 
 
 # ----------  default collate_fn ---------------------------------------------

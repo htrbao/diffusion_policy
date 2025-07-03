@@ -54,7 +54,7 @@ optimizer:
   weight_decay: 1.0e-06
 past_action_visible: false
 policy:
-  _target_: diffusion_policy.policy.diffusion_control_unet_hybrid_image_policy.DiffusionControlnetUnetHybridImagePolicy
+  _target_: diffusion_policy.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
   cond_predict_scale: true
   crop_shape:
   - 84
@@ -85,11 +85,11 @@ policy:
   shape_meta:
     action:
       shape:
-      - 2
+      - 26
     obs:
-      agent_pos:
+      state:
         shape:
-        - 2
+        - 38
         type: low_dim
       image:
         shape:
@@ -97,21 +97,6 @@ policy:
         - 96
         - 96
         type: rgb
-shape_meta:
-  action:
-    shape:
-    - 2
-  obs:
-    agent_pos:
-      shape:
-      - 2
-      type: low_dim
-    image:
-      shape:
-      - 3
-      - 96
-      - 96
-      type: rgb
 task:
   dataset:
     _target_: diffusion_policy.dataset.lerobot_dataset.LeRobotDataset
@@ -121,8 +106,8 @@ task:
     pad_before: 1
     seed: 42
     val_ratio: 0.02
-    root: data/G1_pick_ball_1606
-    cache_video: false
+    root: data/G1_pick_part_2506
+    cache_video: true
   env_runner:
     _target_: diffusion_policy.env_runner.pusht_image_runner.PushTImageRunner
     fps: 10

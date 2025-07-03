@@ -334,8 +334,7 @@ class DiffusionControlnetUnetHybridImagePolicy(BaseImagePolicy):
     def compute_loss(self, batch):
         # normalize input
         assert 'valid_mask' not in batch
-        print(batch.keys())
-        nobs = self.normalizer.normalize(batch['observation.images.head_cam'])
+        nobs = self.normalizer['observation_images_head_cam'].normalize(batch['observation.images.head_cam'])
         nactions = self.normalizer['action'].normalize(batch['action'])
         npast_action = None
         if 'past_action' in batch:

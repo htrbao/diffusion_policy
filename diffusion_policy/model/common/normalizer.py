@@ -203,6 +203,8 @@ def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
     dim = 1
     if last_n_dims > 0:
         dim = np.prod(data.shape[-last_n_dims:])
+        if dim - int(dim) <= 1e-9:
+            dim = int(dim)
     data = data.reshape(-1,dim)
 
     # compute input stats min max mean std
